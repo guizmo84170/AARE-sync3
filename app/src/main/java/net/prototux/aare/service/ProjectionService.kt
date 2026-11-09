@@ -86,6 +86,8 @@ class ProjectionService : Service() {
     private var projection: MediaProjection? = null
     private var usbAccessory: UsbAccessory? = null
     private var usbRetries = 0
+    /** elapsedRealtime of the USB_ACCESSORY_ATTACHED being handled, 0 when unknown (diagnostics). */
+    private var usbAttachedAt = 0L
     /** The accessory whose USB permission dialog is showing; keeps the service alive until answered. */
     private var usbPermissionPending: UsbAccessory? = null
     private var usbPermissionReceiver: BroadcastReceiver? = null
@@ -112,7 +114,10 @@ class ProjectionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         goForeground()
         when (intent?.action) {
-            ACTION_USB -> IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_ACCESSORY, UsbAccessory::class.java)?.let { openUsb(it) }
+            ACTION_USB -> IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_ACCESSORY, UsbAccessory::class.java)?.let {
+                usbAttachedAt = intent.getLongExtra(EXTRA_USB_ATTACHED_AT, 0L)
+                openUsb(it)
+            }
             ACTION_WIRELESS -> intent.getStringExtra(EXTRA_DEVICE)?.let { connectWireless(it) }
             ACTION_PROBE_WIRELESS -> probeConnectedWireless()
             ACTION_AUDIO_CONSENT -> acceptAudioConsent(intent)
@@ -261,8 +266,16 @@ class ProjectionService : Service() {
             requestUsbPermission(usb, accessory)
             return
         }
-        val transport = runCatching { UsbAccessoryTransport(usb, accessory) }
+        val transport = runCatching { UsbAccessoryTransport(usb, accessory) { log("USB: first data from car, $it") } }
             .onFailure { log("USB: ${it.message}") }.getOrNull() ?: return
+        // Diagnostics (SYNC 3): some head units send their version request once, right after the
+        // switch to accessory mode. If we open late, it may be lost.
+        if (usbAttachedAt > 0) {
+            log("USB: opened ${SystemClock.elapsedRealtime() - usbAttachedAt} ms after the accessory attached")
+            usbAttachedAt = 0L
+        } else {
+            log("USB: opened (retry or probe, no attach time)")
+        }
         startSession(transport, wireless = false, peerKey = usbPeerKey(accessory), trustOnFirstUse = false)
     }
 
@@ -385,7 +398,11 @@ class ProjectionService : Service() {
             // The budget counts drops in a row, not per plug-in: a head unit that drops each link at once is not retried forever.
             if (SystemClock.elapsedRealtime() - sessionStart > USB_RETRY_RESET_MS) usbRetries = 0
             val acc = usbAccessory
-            if (acc != null && pinRefusal == null && usbRetries++ < 3 && getSystemService(UsbManager::class.java).accessoryList?.contains(acc) == true) {
+            // A head unit that never sent its version request on this link won't send it on a
+            // reopened fd either: it only starts over after a new USB enumeration (SYNC 3).
+            val silentHeadUnit = acc != null && "no version request" in why
+            if (silentHeadUnit) log("USB: the car never started the protocol on this link; unplug and replug the cable to retry")
+            if (acc != null && !silentHeadUnit && pinRefusal == null && usbRetries++ < 3 && getSystemService(UsbManager::class.java).accessoryList?.contains(acc) == true) {
                 // openUsb checks hasPermission() again and asks for it if it was lost.
                 main.postDelayed({ if (this@ProjectionService.session == null) openUsb(acc) }, 1_500)
             } else {
@@ -555,6 +572,7 @@ class ProjectionService : Service() {
         const val ACTION_WIRELESS = "net.prototux.aare.WIRELESS"
         const val ACTION_PROBE_WIRELESS = "net.prototux.aare.PROBE_WIRELESS"
         const val EXTRA_DEVICE = "device"
+        const val EXTRA_USB_ATTACHED_AT = "usb_attached_at"
         const val ACTION_AUDIO_CONSENT = "net.prototux.aare.AUDIO_CONSENT"
         const val EXTRA_RESULT_CODE = "code"
         const val EXTRA_RESULT_DATA = "data"
@@ -587,9 +605,10 @@ class ProjectionService : Service() {
             startUsb(context, accessory)
         }
 
-        fun startUsb(context: Context, accessory: UsbAccessory) {
+        fun startUsb(context: Context, accessory: UsbAccessory, attachedAt: Long = 0L) {
             context.startForegroundService(Intent(context, ProjectionService::class.java).setAction(ACTION_USB)
-                .putExtra(UsbManager.EXTRA_ACCESSORY, accessory))
+                .putExtra(UsbManager.EXTRA_ACCESSORY, accessory)
+                .putExtra(EXTRA_USB_ATTACHED_AT, attachedAt))
         }
 
         /** (Re)applies the listening settings: starts the service if something should listen. */

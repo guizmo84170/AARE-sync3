@@ -27,6 +27,7 @@ class UsbAccessoryActivity : Activity() {
 
     private fun forward(intent: Intent?) {
         val accessory = intent?.let { IntentCompat.getParcelableExtra(it, UsbManager.EXTRA_ACCESSORY, android.hardware.usb.UsbAccessory::class.java) } ?: return
-        ProjectionService.startUsb(this, accessory)
+        net.prototux.aare.DiagLog.add("USB: accessory attached (${accessory.model} ${accessory.version})")
+        ProjectionService.startUsb(this, accessory, attachedAt = android.os.SystemClock.elapsedRealtime())
     }
 }
