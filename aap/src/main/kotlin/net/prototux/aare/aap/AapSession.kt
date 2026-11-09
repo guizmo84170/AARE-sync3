@@ -186,6 +186,7 @@ class AapSession(
     }
 
     fun start() {
+        startedMs = now()
         Thread(::readLoop, "aap-reader").apply { isDaemon = true; priority = Thread.MAX_PRIORITY - 1 }.start()
         Thread(::writeLoop, "aap-writer").apply { isDaemon = true; priority = Thread.MAX_PRIORITY - 1 }.start()
         // The head unit opens with a version request; if nothing comes at all, give up.
@@ -256,7 +257,7 @@ class AapSession(
                 m.onSent?.invoke()
             }
         } catch (e: Throwable) {
-            fail("write failed", e)
+            fail("write failed in state $state: ${describe(e)}", e)
         }
     }
 
@@ -268,7 +269,7 @@ class AapSession(
                 dispatch(msg)
             }
         } catch (e: Throwable) {
-            fail(if (closed.get()) "closed" else "read failed", e)
+            fail(if (closed.get()) "closed" else "read failed in state $state: ${describe(e)}", e)
         }
     }
 
@@ -528,6 +529,13 @@ class AapSession(
     }
 
     // ------------------------------------------------------------------ teardown
+
+    /** Short cause for the connection log: EOF (peer hung up) vs I/O error vs bad data. */
+    private fun describe(e: Throwable): String =
+        (if (e is java.io.EOFException) "head unit closed the link (EOF)" else "${e.javaClass.simpleName}: ${e.message}") +
+            " after ${now() - startedMs} ms"
+
+    @Volatile private var startedMs = now()
 
     private fun fail(reason: String, error: Throwable?) {
         if (closed.get()) return
