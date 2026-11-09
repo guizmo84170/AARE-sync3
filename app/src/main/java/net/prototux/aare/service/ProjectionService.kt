@@ -270,6 +270,9 @@ class ProjectionService : Service() {
             .onFailure { log("USB: ${it.message}") }.getOrNull() ?: return
         // Diagnostics (SYNC 3): some head units send their version request once, right after the
         // switch to accessory mode. If we open late, it may be lost.
+        if (googleAndroidAutoEnabled()) {
+            log("USB: Google's Android Auto is enabled on this phone; it may reset USB while AARE is connected (ENODEV). If the link drops, turn off its automatic start or disable it")
+        }
         if (usbAttachedAt > 0) {
             log("USB: opened ${SystemClock.elapsedRealtime() - usbAttachedAt} ms after the accessory attached")
             usbAttachedAt = 0L
@@ -401,6 +404,10 @@ class ProjectionService : Service() {
             // A head unit that never sent its version request on this link won't send it on a
             // reopened fd either: it only starts over after a new USB enumeration (SYNC 3).
             val silentHeadUnit = acc != null && "no version request" in why
+            if (acc != null && "ENODEV" in why) {
+                log("USB: the phone's USB link vanished mid-session (ENODEV), not a protocol refusal" +
+                    if (googleAndroidAutoEnabled()) "; Google's Android Auto is enabled and may have reset USB" else "")
+            }
             if (silentHeadUnit) log("USB: the car never started the protocol on this link; unplug and replug the cable to retry")
             if (acc != null && !silentHeadUnit && pinRefusal == null && usbRetries++ < 3 && getSystemService(UsbManager::class.java).accessoryList?.contains(acc) == true) {
                 // openUsb checks hasPermission() again and asks for it if it was lost.
@@ -556,6 +563,14 @@ class ProjectionService : Service() {
 
     private fun log(line: String) = DiagLog.add(line)
 
+    /**
+     * Google's Android Auto watches USB too: when it sees an Android Auto accessory it isn't
+     * serving, its watchdog may reset the USB port or gadget, which kills AARE's link (ENODEV).
+     */
+    private fun googleAndroidAutoEnabled(): Boolean = runCatching {
+        packageManager.getApplicationInfo(GOOGLE_ANDROID_AUTO, 0).enabled
+    }.getOrDefault(false)
+
     companion object {
         private const val TAG = "AareService"
         private const val CHANNEL = "connection"
@@ -573,6 +588,7 @@ class ProjectionService : Service() {
         const val ACTION_PROBE_WIRELESS = "net.prototux.aare.PROBE_WIRELESS"
         const val EXTRA_DEVICE = "device"
         const val EXTRA_USB_ATTACHED_AT = "usb_attached_at"
+        private const val GOOGLE_ANDROID_AUTO = "com.google.android.projection.gearhead"
         const val ACTION_AUDIO_CONSENT = "net.prototux.aare.AUDIO_CONSENT"
         const val EXTRA_RESULT_CODE = "code"
         const val EXTRA_RESULT_DATA = "data"
